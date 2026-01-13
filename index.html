@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+    <style>
+        .center{
+            margin-left:50%;
+            transform: translateX(-50%);
+        }
+        #video{
+            width:100%;
+            height:100%;
+            object-fit:fill;
+            top: 0;
+            left: 0;   
+        }
+        html, body {
+            margin: 0;         
+            padding: 0;
+            height: 100%;  
+        }
+
+        .modal{
+            display: none; 
+            z-index: 1000;
+            width: 100%;
+            height: 100%;
+            position:fixed;
+            overflow: auto;
+            top:0;
+            left:0;
+        }
+    </style>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <div>
+        <button class="center" id="startBtn">Start</button>
+    </div>
+    <div id="videoModal" class="modal">
+        <video id="video" autoplay playsinline></video>
+    </div>
+
+
+<script>
+
+</script>
+<script type="module">
+  import * as vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+  const {
+    HandLandmarker,
+    FilesetResolver,
+    DrawingUtils
+  } = vision;
+
+    const SPIN_DISTANCE = 1.0; // threshold distance to start spinning
+    const SPIN_SPEED = 0.1;    // rotation speed
+
+  async function start() {
+    if(!confirm("Do You Want To Start")){
+        return;
+    }
+    const videoModal = document.getElementById("videoModal");
+    const video = document.getElementById("video");
+
+    videoModal.style.display = "flex";
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 1280, height: 720 } });
+    video.srcObject = stream;
+    await video.play();
+    const scene = new THREE.Scene();
+
+    const videoTexture = new THREE.VideoTexture(video);
+    scene.background = videoTexture;
+    // 3️⃣ Create camera
+    const camera = new THREE.PerspectiveCamera(
+      70,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      1000
+    );
+    camera.position.z = 5;
+    const axesHelper = new THREE.AxesHelper(2);
+    scene.add(axesHelper);
+    // 4️⃣ Renderer
+    const renderer = new THREE.WebGLRenderer({ alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.domElement.style.position = "absolute";
+    renderer.domElement.style.top = "0";
+    renderer.domElement.style.left = "0";
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.zIndex = "1001";
+    renderer.domElement.style.pointerEvents = "none";
+    renderer.domElement.style.objectFit = "fill";
+
+    document.body.appendChild(renderer.domElement);
+    function isFist(landmarks) {
+        if(!landmarks) return false;
+        // Check index, middle, ring, pinky
+        const fingers = [
+        [8,6],   // index tip & pip
+        [12,10], // middle
+        [16,14], // ring
+        [20,18]  // pinky
+        ];
+        return fingers.every(([tip,pip]) => landmarks[tip].y > landmarks[pip].y);
+    }
+    const fileset = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    );
+
+    const handLandmarker = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+        },
+        runningMode: "VIDEO",
+        numHands: 2
+    });
+let cube = null; // single cube we reuse
+let previouslyFist = false;
+const loader = new THREE.TextureLoader();
+const texture = loader.load('https://threejs.org/examples/textures/crate.gif');
+const material = new THREE.MeshBasicMaterial({ map: texture });
+const geometry = new THREE.BoxGeometry(1,1,1);
+
+async function animate() {
+    requestAnimationFrame(animate);
+
+    const results = await handLandmarker.detectForVideo(video, performance.now());
+
+    if (results.landmarks && results.landmarks.length > 0) {
+        const hand = results.landmarks[0];
+        const fistNow = isFist(hand);
+    
+        if (fistNow) {
+            const center = hand[9]; // middle of palm
+
+            const x = (center.x - 0.5) * 5;
+            const y = -(center.y - 0.5) * 5;
+            const z = -1; // in front of video
+
+            if (!cube) {
+                // Create cube only once
+                cube = new THREE.Mesh(geometry, material);
+                scene.add(cube);
+            }
+
+            // Update cube position to follow hand
+            cube.position.set(x, y, z);
+            console.log(cube.position)
+        } else {
+            // Fist released → remove cube
+            if (cube) {
+                scene.remove(cube);
+                cube = null;
+            }
+        }
+
+        // 2️⃣ Check second hand for spinning
+        if (results.landmarks.length > 1 && cube) {
+            const hand2 = results.landmarks[1];
+            const indexTip = hand2[8]; // index finger tip
+
+            // Convert to Three.js coordinates
+            const fingerPos = new THREE.Vector3(
+                (indexTip.x - 0.5) * 5,
+                -(indexTip.y - 0.5) * 5,
+                -1
+            );
+
+            // Compute distance to cube
+            const distance = cube.position.distanceTo(fingerPos);
+
+            if (distance < SPIN_DISTANCE) {
+                // Spin the cube
+                cube.rotation.x += SPIN_SPEED;
+                cube.rotation.y += SPIN_SPEED;
+            }
+        }
+
+        previouslyFist = fistNow;
+    }
+
+
+    renderer.render(scene, camera);
+}
+
+    animate();
+
+     window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+  }
+
+
+  document
+  .getElementById("startBtn")
+  .addEventListener("click", start);
+
+ 
+</script>
+</body>
+</html>
