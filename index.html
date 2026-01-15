@@ -101,17 +101,116 @@
     renderer.domElement.style.display = "flex";
 
     document.body.appendChild(renderer.domElement);
-    function isFist(landmarks) {
-        if(!landmarks) return false;
-        // Check index, middle, ring, pinky
-        const fingers = [
-        [8,6],   // index tip & pip
-        [12,10], // middle
-        [16,14], // ring
-        [20,18]  // pinky
-        ];
-        return fingers.every(([tip,pip]) => landmarks[tip].y > landmarks[pip].y);
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let strokePoints = [];
+    let currentStroke = null;
+
+    function fingerToRay(finger) {
+    mouse.x = (finger.x * 2) - 1;
+    mouse.y = -(finger.y * 2) + 1;
+    raycaster.setFromCamera(mouse, camera);
     }
+
+function getFinger3DPoint(finger, camera) {
+    // Convert normalized screen coords to NDC
+    const ndc = new THREE.Vector3(
+        (finger.x * 2) - 1,
+        -(finger.y * 2) + 1,
+        0.5 // z in NDC just for direction
+    );
+
+    // Convert to world coordinates along camera ray
+    ndc.unproject(camera);
+
+    // Direction from camera
+    const dir = ndc.sub(camera.position).normalize();
+
+    // Map MediaPipe z to world distance
+    // Adjust min/max depth as needed for your scene
+    const depth = THREE.MathUtils.mapLinear(finger.z, -0.4, 0.2, 1, 10);
+
+    return camera.position.clone().add(dir.multiplyScalar(depth));
+}
+
+
+
+    function makeStroke(points) {
+        if (points.length < 2) return;
+
+        const curve = new THREE.CatmullRomCurve3(points);
+
+        const geometry = new THREE.TubeGeometry(curve, 64, 0.03, 8, false);
+
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x00ff88,
+            emissive: 0x008844
+        });
+
+        return new THREE.Mesh(geometry, material);
+    }
+
+
+function addPoint(point) {
+    strokePoints.push(point.clone());
+
+    if (strokePoints.length < 2) return;
+
+    // Remove old mesh
+    if (currentStroke) {
+        scene.remove(currentStroke);
+        currentStroke.geometry.dispose();
+        currentStroke.material.dispose();
+    }
+
+    // Smooth curve through points
+    const curve = new THREE.CatmullRomCurve3(strokePoints);
+
+    // Tube geometry gives thickness
+    const geometry = new THREE.TubeGeometry(curve, 64, 0.03, 8, false);
+
+    const material = new THREE.MeshStandardMaterial({
+        color: 0x00ff88,
+        emissive: 0x008844,
+        roughness: 0.5,
+        metalness: 0.2
+    });
+
+    currentStroke = new THREE.Mesh(geometry, material);
+    scene.add(currentStroke);
+}
+
+
+
+    function isIndexFingerOnly(landmarks) {
+        const INDEX_TIP = 8;
+        const INDEX_PIP = 6;
+
+        const MIDDLE_TIP = 12;
+        const MIDDLE_PIP = 10;
+
+        const RING_TIP = 16;
+        const RING_PIP = 14;
+
+        const PINKY_TIP = 20;
+        const PINKY_PIP = 18;
+
+        const THUMB_TIP = 4;
+        const THUMB_IP = 3;
+
+        const indexUp = landmarks[INDEX_TIP].y < landmarks[INDEX_PIP].y;
+        const middleDown = landmarks[MIDDLE_TIP].y > landmarks[MIDDLE_PIP].y;
+        const ringDown = landmarks[RING_TIP].y > landmarks[RING_PIP].y;
+        const pinkyDown = landmarks[PINKY_TIP].y > landmarks[PINKY_PIP].y;
+
+        // Thumb is sideways, so use X axis
+        const thumbDown =
+            Math.abs(landmarks[THUMB_TIP].x - landmarks[THUMB_IP].x) < 0.03;
+
+        return indexUp && middleDown && ringDown && pinkyDown && thumbDown;
+    }
+
     const fileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
     );
@@ -123,70 +222,31 @@
         runningMode: "VIDEO",
         numHands: 2
     });
-let cube = null; // single cube we reuse
-let previouslyFist = false;
-const loader = new THREE.TextureLoader();
-const texture = loader.load('https://threejs.org/examples/textures/crate.gif');
-const material = new THREE.MeshBasicMaterial({ map: texture });
-const geometry = new THREE.BoxGeometry(1,1,1);
+    let cube = null; // single cube we reuse
+    let previouslyFist = false;
+    const loader = new THREE.TextureLoader();
+    const texture = loader.load('https://threejs.org/examples/textures/crate.gif');
+    const material = new THREE.MeshBasicMaterial({ map: texture });
+    const geometry = new THREE.BoxGeometry(1,1,1);
 
-async function animate() {
-    requestAnimationFrame(animate);
+    async function animate() {
+        requestAnimationFrame(animate);
 
     const results = await handLandmarker.detectForVideo(video, performance.now());
 
-    if (results.landmarks && results.landmarks.length > 0) {
-        const hand = results.landmarks[0];
-        const fistNow = isFist(hand);
-    
-        if (fistNow) {
-            const center = hand[9]; // middle of palm
+    if (!results.landmarks || results.landmarks.length === 0) return;
 
-            const x = (center.x - 0.5) * 5;
-            const y = -(center.y - 0.5) * 5;
-            const z = -1; // in front of video
+    const lm = results.landmarks[0];   // first hand
+    const finger = lm[8];
 
-            if (!cube) {
-                // Create cube only once
-                cube = new THREE.Mesh(geometry, material);
-                scene.add(cube);
-            }
-
-            // Update cube position to follow hand
-            cube.position.set(x, y, z);
-            console.log(cube.position)
-        } else {
-            // Fist released → remove cube
-            if (cube) {
-                scene.remove(cube);
-                cube = null;
-            }
-        }
-
-        // 2️⃣ Check second hand for spinning
-        if (results.landmarks.length > 1 && cube) {
-            const hand2 = results.landmarks[1];
-            const indexTip = hand2[8]; // index finger tip
-
-            // Convert to Three.js coordinates
-            const fingerPos = new THREE.Vector3(
-                (indexTip.x - 0.5) * 5,
-                -(indexTip.y - 0.5) * 5,
-                -1
-            );
-
-            // Compute distance to cube
-            const distance = cube.position.distanceTo(fingerPos);
-
-            if (distance < SPIN_DISTANCE) {
-                // Spin the cube
-                cube.rotation.x += SPIN_SPEED;
-                cube.rotation.y += SPIN_SPEED;
-            }
-        }
-
-        previouslyFist = fistNow;
+    if (isIndexFingerOnly(lm)) {
+        const p = getFinger3DPoint(finger,camera);
+        if (p) addPoint(p);
+    } else {
+        strokePoints = [];
+        currentStroke = null;
     }
+
 
 
     renderer.render(scene, camera);
